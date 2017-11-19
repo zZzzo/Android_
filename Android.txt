@@ -1,0 +1,499 @@
+								Android底层开发
+
+一、Android系统的组成(Linux的一种)
+	Bootloader
+		u-boot...
+	linux内核
+		zImage/uImage...
+	根文件系统(Android跟Linux系统最大不一样的地方,安卓的图形界面)
+		rootfs/filesystem(一些文件夹的集合)
+			[bin sbin etc lib var home ...]
+QT比Android稳定,应用在一些医疗系统....安卓在娱乐方面比较多.
+
+二、Android系统的分层:
+			App
+		--------------	
+用户态	  Framework			
+		--------------		这两层属于根文件系统
+		c/c++Lib | DVM
+		==============
+内核态		kernel
+	
+			
+三、Linux的根文件系统:
+	1.根文件系统目录结构:
+		bin		
+		sbin  这两个是提供命令的(ls ...)which ls-->/bin/ls
+					busybox:提供命令的工具(也叫瑞士军刀)
+		etc	  系统/软件配置文件/脚本 *inittab
+		lib	  提供so(也分架构的:x86 和 arm)(so:功能包,一些功能函数的集合)
+		home  adduser创建一个文件夹
+		root
+			这三个都是在内存里面(由内核创建):
+		dev	   设备节点			
+		sys    驱动信息:sys/bus、sys/dev...
+		proc   系统信息:cpuinfo、device...
+		
+	2.制作根文件系统:
+	===>2.1 制作bin/sbin
+		用到busybox(提供命令),作为祖先进程
+		①修改busybox的Makefile：
+			ARCH跟CROSS_COMPILE
+		②make menuconfig
+			分为两部分:编译选项、命令分类
+				在编译选项中:
+					  Build Options --->
+						[*]Build BusyBox as a static binary(编译成静态二进制文件?)
+					  Installation Options --->	(编译之后做的事情)
+						[*]Don't use/usr	不选的话会安装到这个目录
+											而是放在./_install
+		③ make -j2
+		④ make install 生成_install(里面有bin linuxrc sbin)
+		⑤ cp -raf 到我的根文件系统去(当源和目标文件夹同名,那么是合并而不是覆盖)
+	-----------------------------------------------------------------------
+	===>2.2 制作lib
+		①进到交叉编译工具的lib，cp -raf 到根文件系统的lib下
+		②删除符号表(瘦身)
+			rm -rf lib/*.a
+		③给动态库strip一下	
+			先要给权限:chmod a+w lib/*	(要有修改权限)
+			arm-none-linux-gnueabi-strip lib/*.so
+	-----------------------------------------------------------------------
+	===>2.3 制作etc		
+	etc文件的权限不要随意更改,etc的权限一旦更改,系统就废了。
+	
+		①创建 inittab	
+			参照busybox/example:
+				::sysinit:/etc/init.d/rcS
+				::askfirst:-/bin/ash
+				::ctrlaltdel:/sbin/reboot
+				::shutdown:/sbin/swapoff -a
+				::shutdown:/bin/umount -a -r
+				::restart:/sbin/init
+			busybox不仅提供命令,还作为祖先进程,当系统启动时,它会去读取etc/inittab文件
+			得到它需要fork的子进程的信息.所以inittab就是一个配置文件,告诉祖先进程要fork
+			哪些进程.
+		===>分析配置信息的意思:
+				<id>:<runlevels>:<action>:<process> : 用id终端在action时间启动process进程
+					<id>: 进程所使用的终端名
+					<runlevels>可以不管它.
+					<action>: 其实就是时间点,可以填sysinit, respawn(重生), askfirst, wait,
+												once, restart, ctrlaltdel, and shutdown
+			
+		===>第一句的意思:系统一启动就执行/etc/init.d/rcS这个脚本,所以还要创建一个这个脚本
+		
+		②创建etc/init.d/rcS脚本
+			(脚本写完一定要给权限(chmod a+x rcS))
+		
+		===>写上
+			#!/bin/sh
+			echo ">>>>>>>> in /etc/init.d/rcS<<<<<<<<<<<<<<<<<"
+			/bin/mount -a				//挂载/etc/fstab中提到的文件系统
+			echo /sbin/mdev > /proc/sys/kernel/hotplug
+			/sbin/mdev -s				//自动创建设备结点
+
+			分析:
+			/bin/mount -a 
+				查man可以知道-a的意思是:
+				Mount all filesystem mentioned in fstab
+					挂载fstab提到的所有文件系统,就是在/etc下的fstab.
+		
+		====>挂载的意思：为存储设备提供一个访问点
+			在uboot的bootargs变量中的root=dev/nfs 表示根文件系统挂载网络的根文件系统
+			还可以: /dev/mtdblock1 挂载flash分区1的文件系统
+					/dev/sda1      挂载硬盘的文件系统
+			所以root的作用就是告诉内核文件系统在哪里。
+			
+		③创建/etc/fstab文件:
+		
+			其实就是一个列表,提供 mount -t 所需的参数(mount -a 是批量操作)
+				(mount -t 文件系统类型 要挂载的文件系统 挂载点)
+			
+		#device     mount-point     type        options    dump  fsck order
+		proc          /proc         proc        defaults    0       0
+		tmpfs         /tmp          tmpfs       defaults    0       0
+		sysfs         /sys          sysfs       defaults    0       0
+		tmpfs         /dev          tmpfs       defaults    0       0
+
+		dump：记录出错信息
+		fsck order：磁盘扫描的先后顺序
+		options：挂载的时候的一些选项
+			
+		④附加:创建profile文件(命令提示符)
+			在/etc下创建profile文件,busybox就会自动去执行这个脚本,
+			主要是添加上PS1提示符
+			#!/bin/sh
+			export HOSTNAME=farsight
+			export USER=root
+			export HOME=root
+			export PS1="[$USER@$HOSTNAME \W]\# "	//提示符[]
+			PATH=/bin:/sbin:/usr/bin:/usr/sbin		
+			LD_LIBRARY_PATH=/lib:/usr/lib:$LD_LIBRARY_PATH
+			export PATH  LD_LIBRARY_PATH
+	-----------------------------------------------------------------------		
+	3.根文件系统的烧录
+		根文件系统其实就是Linux系统运行所需的一些文件，命令组成的整个文件目录结构,
+		要将它们烧录到板子上,需要先将它们制作成一个整体,也就是-->镜像(二进制文件)
+		
+		1.cramfs镜像:只读压缩的
+			特点:  启动快,文件最大支持256MB,单个文件最大16MB
+			
+		2.jffs2镜像:支持NOR 和NAND FLASH (对NAND的支持天生不足)
+			特点: 1.可读写
+                  2. 挂载慢(特别是在小文件很多的文件系统中,就更慢)
+                  3. 当数据占到JFFS2分区的75~80%左右时,性能会急剧下降
+
+四、Android的根文件系统
+	编译android系统源码==>生成根文件系统
+	===>4.1 编译步骤:	
+		 a, 初始化编译环境,
+			作用:加载编译命令(lunch,mmm,croot...)和产品	
+			source build/envsetup.sh
+				including device/farsight/fs210/vendorsetup.sh
+				including device/moto/stingray/vendorsetup.sh
+				including device/moto/wingray/vendorsetup.sh
+				including sdk/bash_completion/adb.bash	
+		 b, 选择一个产品(product)或者说分支	
+			lunch命令，也就是说生成的镜像要运行在什么设备上.如下:
+			You're building on Linux
+
+			Lunch menu... pick a combo:
+			 1. full-eng
+				...
+			 4. full_fs210-userdebug
+			 5. full_fs210-eng
+
+			它的格式是这样的:BUILD-BUILDTYPE
+			编译出的镜像可以运行在什么环境中-编译类型
+			编译类型有三种: user:正式版本,它的权限是被限制的.
+							userdebug:在user上开放root和debug权限
+							eng:engineer,工程师版本
+			一般开发时选择eng.
+		c,编译
+			make (要编译很久)
+		
+	===>4.2 制作Android的根文件系统
+		核心步骤:
+		经过make之后,生成out/target/product/fs210/下的3个重要文件夹
+			data + root + system =>最终的根文件系统
+		在这个文件下还有几个重要的.img文件:(这是安卓特有的镜像文件)
+			system -> system.img 
+			root -> ramdisk.img
+			data -> userdata.img
+		obj 和 symbols 都是编译时的中间文件(.o)
+			
+		所以核心步骤就是将data,root,system这几个文件夹拷贝到要制作的根文件系统的目录下	
+		但是不需要手动去每个cp,在Android源码根目录下有个脚本(xxx_build.sh)
+		执行脚本前,要先修改:
+			33 #       make -j$CPU_JOB_NUM
+			80         chmod -R 777 rootfs_dir/system/vendor
+		可以看到,在make_rootfs()函数中:
+			cp -af root/ rootfs_dir
+			cp -af system/* rootfs_dir/system
+			cp -af data/* rootfs_dir/data
+			chmod -R 777 rootfs_dir/system/vendor
+	/******************************************************************************/
+		也就是说,核心操作-->执行脚本xxx_build.sh-->生成out/target/product/fs210/rootfs_dir	
+	/******************************************************************************/
+	
+	===>4.3	分析Android根文件系统:
+		data : app安装目录,用于存放用户安装的软件以及各种数据。
+	   *system ：是Android根文件系统中一个很重要的目录，系统中的大部分东西都在这里了
+		
+		dev	：设备节点文件的存放地。
+		sbin：命令集合
+		proc：/proc 文件系统下的多种文件提供的系统信息不是针对某个特定进程的，
+			  而是能够在整个系统范围的上下文中使用。
+		sys	：用于挂载 sysfs文件系统。
+		
+	   *init : 祖先进程, 所以set bootargs  init=/init
+	   *init.rc : 系统初始化脚本,类似于/etc/init.d/rcS
+		init.fs210.usb.rc
+		init.goldfish.rc
+        init.fs210.rc            
+
+		ueventd.rc : 用于自动创建设备节点,类似于mdev
+		ueventd.fs210.rc 
+		ueventd.goldfish.rc	
+		
+		default.prop : property,属性文件
+	下面分析 init 和 init.rc 和 system:
+	-----------------------------------------------		
+	====>分析init进程(祖先进程):
+		1.init的源码位置:安卓源码目录下的system/core/init/init.c
+		2.重要的点:
+			main()
+			{	...
+				init_parse_config_file("/init.rc");	//分析配置文件init.rc
+		
+				init_parse_config_file("init.fs210.rc"); 
+				...}	
+		3./init.rc:读取(执行)这个文件是祖先进程中最重要的事情.
+			|(分为两部分)
+			|-->命令
+			|-->服务
+		4.流程:
+			------------------------------------------------------------------------
+			|				内核启动-->...-->init= /init(读取init.rc,下面分析)		|
+			|													|                   |
+			|					-----------------------------------------...        |
+			|					|		|			|			|		|	        |
+			|		本地服务  rild    media       Zygote	   ...     ...          |
+			|	(c/c++写的)							|(fork)                         |
+			|									   DVM(所以DVM是个可执行程序)       |
+			|										|                               |
+			|								启动:SystemServer.java(它会启动后台服务)|
+			|					------------------------------------------...       |
+			|					|		|			|			|		  |         |
+			|				ActivityManager		... ... Wifi ...		            |
+			|					|                                                   |
+			|	 HomeActivity<---                                                   |
+			|			                                                            |
+			------------------------------------------------------------------------ 
+			|	所以,如果没有Zygote,那么这只是一个传统的Linux系统,没有图形界面了	|
+			|		 如果没有init.rc,那么就什么都不是.                              |
+			------------------------------------------------------------------------ 
+		5.总结Init的作用：
+			(1)、创建一些linux根文件系统中的目录,挂载文件系统.
+			(2)、读取并且解析init.rc文件
+			(3)、读取并且解析硬件相关的init.magellanbroad.rc脚本文件
+			(4)、初始化动态设备管理，设备文件有变化时反应给内核
+			(5)、启动系统属性服务： system property service
+			(6)、启动init.rc中定义的boot 等各种action和service.		
+	--------------------------------------------------	
+	====>分析init.rc：
+		1.init.rc是由四个部分组成:(其实就Actions和Services)
+			Actions, Commands, Services, and Options.
+		它的语法:system/core/init/readme.txt
+		
+	(1)Actions：一个命令的集合:
+		Actions take the form of:
+			on <trigger>  		// 在什么时候做什么事情
+			   <command>
+			   <command>
+			   <command>
+	
+	(2)Services:(实际就是一个后台进程)	[作用:系统在启动时会去执行这些程序,我可以把要自启动的程序放在这上面]
+		1.语法:
+			service <name> <pathname> [ <argument> ]*	//可执行程序的名字,路径,参数,
+				   <option>
+				   <option>
+		2.例子:
+		    class_start core	//启动所有属于core类的程序(批量)
+			class_start main	
+
+		service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
+			class main										//将serveice归类
+			socket zygote stream 666  	//创建一个字节流的套接字,套接字叫zygote,权限666,/dev/socket/zygote,用于进程间通信
+			onrestart write /sys/android_power/request_state wake
+			onrestart write /sys/power/state on
+			onrestart restart media
+			onrestart restart netd
+	===>那么,自定义开机自启：
+		把可执行程序放到system/bin目录下,
+		然后在init.rc中，添加
+			server name 可执行程序路径(一般将它放在system/bin下)
+				class main	(记得要添加上这句,不然不会自启)
+		
+	--------------------------------------------------	
+	====>分析system文件夹:
+			system  
+			|
+			app :android自带的app,第一次启动的时候会自动安装.可以看到都是以APK格式结尾的文件.
+				在这个文件夹下的程序为系统默认的组件，自己安装的软件将不会出现在这里，而是\data\app
+			
+			bin :这个目录下的文件都是系统的本地程序，从bin文件夹名称可以看出是binary
+				二进制的程序，里面主要是Linux系统自带的组件(命令)
+			etc	:保存的都是系统的配置文件
+			lib	:lib目录中存放几乎所有的共享库（.so）文件
+			xbin :系统员管理工具,与bin一样是一些命令
+			
+		   *build.prop  : property,系统全局属性文件           
+			fonts  : 提供字体库 
+			framework : android framework层java代码编译之后的字节码,在开机的时候会加载到dvm中运行 
+						主要是一些核心的文件,从后缀名为jar可以看出是是系统平台框架
+			media : 开机动画文件所在路径
+			tts  :  用于语言国际化的二进制文件  
+			vendor : 厂商提供的不愿意开源的二进制文件
+			----------------------------------------------
+			build.prop文件是一个属性文件,在Android系统中.prop文件很重要，记录了系统的设置和改变，
+			类似於/etc中的文件。
+	
+五、运行Android系统:
+	cp -raf u-boot.bin  /tftpboot/
+	cp -raf arch/arm/boot/zImage  /tftpboot/
+	cp -raf out/target/product/fs210/rootfs_dir/  /opt/
+			sudo vim /etc/exports
+				/opt/rootfs_dir            *(subtree_check,rw,no_root_squash,async)
+			sudo service nfs-kernel-server restart
+
+		1, 烧录--u-boot.bin 
+			
+			FS210 # tftp 0x40008000 u-boot.bin
+			FS210 # nand erase 0x0 0x100000
+			FS210 # nand write 0x40008000 0x0 0x100000
+			
+		2, tftp--->zImage  
+
+			FS210 # set serverip 192.168.7.4
+			FS210 # set ipaddr 192.168.7.7
+			FS210 # set bootcmd tftp 0x40008000 zImage \; bootm 0x40008000
+			FS210 # save
+
+
+		3, nfs-->rootfs_dir 		
+			FS210 # set bootargs  console=ttySAC0,115200 init=/init  root=/dev/nfs  nfsroot=192.168.7.4:/opt/rootfs_dir  ip=192.168.7.7
+			FS210 # save
+		
+六、在Android系统上开发应用程序---c程序
+		类似在arm环境上开发应用程序：先是编写c文件,然后交叉编译,然后放到板子上执行.
+		在Android系统上也是先编写c文件,然后要写Android.mk(类似Makefile),然后编译(mmm命令),然后放到板子上运行
+		
+		1,编写c程序
+		2,编写Android.mk----基于Makefile 
+			一样是	目标:依赖
+						编译方法 
+		
+			编写技巧: 抄模板(hardware/ril/rild/Android.mk)
+		--------------------------------------------------		
+		|	#获取当前路径 call是调用函数的意思			 |
+		|	LOCAL_PATH:= $(call my-dir)	                 |
+		|	#清空变量                                    |
+		|	include $(CLEAR_VARS)                        |
+		|	#指定依赖-源文件                             |
+		|	LOCAL_SRC_FILES:= \                          |
+		|			hello.c                              |
+        |                                                |
+		|	#在什么模式下编译.optional在任何模式先都编译 |
+		|	LOCAL_MODULE_TAGS := optional                |
+		|			                                     |
+		|	#指定目标文件                                |
+		|	LOCAL_MODULE:= hello_arm_elf                 |
+		|	#编译成可执行程序                            |
+		|	include $(BUILD_EXECUTABLE)	                 |
+		|		|                                        |
+		|		#也可以编译成动态库:SHARE_LIBRARY        |
+		|		#或者编译成静态库:STATIC_LIBRARY         |
+		--------------------------------------------------
+		==>这个Android.mk中的几点问题:
+			(1).include一般是包含一个文件的意思,那么在这里的include $(CLEAR_VARS)是什么意思?
+				在android源码下执行source build/envsetup.sh,lunch 选择分支(产品)后,
+			可以用到它的编译命令(mmm等,通过help命令查看),还有一个重要的命令get_abs_build_var 
+			它可以查看include后面的变量的路径,比如 get_abs_build_var CLEAR_VARS,得到:
+					/home/george/src_210/android4.0-fs210_v2/build/core/clear_vars.mk
+				(也可以 get_build_var -->得到相对路径)
+			(2)去查看	
+				include $(CLEAR_VARS)
+				include $(BUILD_EXECUTABLE)	都是些什么		
+			
+		3,编译我的应用程序
+			m:	编译所有的模块 
+			mm:	编译当前目录下的模块，当前目录下要有Android.mk文件 
+			mmm:编译指定路径下的模块，指定路径下要有Android.mk文件 
+			
+		4,怎么调试?(android中的Log系统)
+=========================================================================
+七、Android的Log系统(一个大类)
+	1.在Linux内核中:
+		使用的是printk,它提供格式化输出功能,它有打印级别,且将信息保存到/proc/kmsg日志中
+		使用dmesg可以看到linux内核的缓冲区打印的信息.它是针对内核的,而Android中的缓冲区
+		是针对用户控件的应用程序的.
+	2.在android中log输出:
+		android系统在用户空间中提供了轻量级的logger日志系统,它是在内核中实现的一种设备驱动,
+	与用户空间的logcat工具配合使用可以方便的调试程序
+		
+	==>在驱动中(android特有的),实现了4个环形缓冲区,用来存放应用程序的调试信息。
+		---------------------------------------------------
+		|	->main:		主缓冲区						  |
+		|	->system:	后台服务(一些守护进程的调试信息)  |
+		|	->radio:	无线服务(电话/短信/网络等)		  |
+		|	->events:	随机数据(一些通知等)			  |
+		---------------------------------------------------
+		|在板子上也可以看到:	/dev/log/events			  |
+		|						/dev/log/main             |---------------------------------------
+		|						/dev/log/radio            |安卓也是Linux内核,所以:				 |
+		|						/dev/log/system           |其实还有一个内核调试信息printk的缓冲区|
+	 	------------------------------------------------------------------------------------------
+		那么一共有5个,printk对应的缓冲区是不显示的,得用dmesg去打印出来
+	(1)用法：
+		在Java程序中：
+			是用Log.d();来写到环形缓冲区的:
+				String TAG = "HelloActivity";
+				Log.d(TAG,"xxxxxxxxx");
+					-->
+						D/HelloActivity(pid) :"xxxxxxxxx"
+			
+	===>在c/c++中,是通过宏来使用的：
+			LOGD();(LOGI/LOGW/LOGE)写到环形缓冲区.类似printk的用法(格式输出)
+			=>a.要加上标签跟头文件:
+				#define LOG_TAG "hello_tag"	<-----这里的TAG自己定义,但是一定要放在头文件前面.
+				#include <utils/Log.h>
+			  b.在程序中使用:
+				LOGD("Hello Andorid Log");
+			  c.在编译时要连接动态库,也就是在Android.mk里面要加上:
+				-------------------------------------------------------------
+				|	LOCAL_PATH:= $(call my-dir)								|
+				|	include $(CLEAR_VARS)                                   |
+                |                                                           |
+				|	#编译时连接动态库--libcutils,类似于gcc xx.c -o xx -lxxx |
+				|	#LOGD()函数的实现是在libcutils.so实现的                 |
+				|	#声明是在utils/Log.h                                    |
+				|	LOCAL_SHARED_LIBRARIES := \                             |
+				|			libcutils                                       |
+				|                                                           |
+				|	LOCAL_MODULE_TAGS := optional                           |
+                |                                                           |
+				|	LOCAL_SRC_FILES:= hello.c                               |
+				|                                                           |
+				|	LOCAL_MODULE:= hello_arm_elf                            |
+				|                                                           |
+				|	include $(BUILD_EXECUTABLE)                             |
+				-------------------------------------------------------------
+				d.编译(mmm ...)
+	(2)查看调试信息:
+		【输出级别+LOG_TAG名字+进程号+打印的信息】
+		级别:
+			V : verbose(详细)
+			D : debug
+			I : info
+			W : warnning
+			E : error
+			F : fatal(致命)
+		标签tag:区别是哪个进程或文件打印的打印信息		
+	
+	(3)logcat的用法
+		执行logcat默认查看的是main和system缓冲区的内容.
+		-h :帮助
+		-b :指定缓存区
+			logcat -b main
+		-c :清空缓冲区
+		-s :过滤
+			logcat -s "dalvikvm"	(查看标签为dalvikvm的调试信息)
+			logcat -s "dalvikvm:w"	(查看标签为dalvikvm,且等级为w的调试信息)
+			
+
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+			
+			
+			
+			
+		

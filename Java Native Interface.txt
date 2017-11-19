@@ -1,0 +1,234 @@
+
+	APK			①加载动态库		②声明native方法
+(java代码)				|			③调用nativa的方法dev_on(其实是调用JNI层实现的cpp代码)
+			------------|--------------------|-------------------------------
+						|					 |			
+	JNI				OnLoad()				 |				led_on()
+(c/c++代码)			{       				 |				{
+					得到env				     |					fd = open();	
+					env->rgst(映射表)注册到 DVM	----------->	write(fd);
+					}(DVM就得到java方法和c函数的映射关系)	 }		|
+			--------------------------------------------------------|--------		
+													  到内核找到驱动|					
+	内核					fop: open = led_drv_open();				|
+								write = led_drv_write();	<--------
+			-----------------------------------------------------------------
+
+
+八、Android的JNI(Java Native Interface)-----Java调用c/c++的接口
+
+	==>8.1 java中调用jni的接口(在app上):
+		(以控制led为例,在app中的按钮监听事件中,要做这三件事:)
+		1, 加载jni的so库
+			static{		//一调用new就会执行静态代码块
+					System.loadLibrary("led_jni"); 		// /system/lib/libled_jni.so
+				}
+			
+		2, 声明native本地方法(告诉编译器这些函数是在jni中的c/c++实现的)
+			public native void openDev();
+			public native int devOn();
+			public native int devOff();
+			public native void closeDev();
+			
+		3, 调用native本地方法
+			mynative.openDev();
+			
+	------------------------------------------------------------------------------------
+	==>8.2 在ubuntu中编写jni.cpp:(模版:development/samples/SimpleJNI/jni)
+		(1)apk调用System.LoadLibrary()的时候,会调用jni的JNI_ONLoad()函数:
+			jint JNI_OnLoad(JavaVM* vm, void* reserved)
+				{				
+					//1.获取到环境变量对象--->提供各种操作方法(注册方法)
+						JNIEnv *env;
+						vm->GetEnv(&env, 版本(JNI_VERSION_1_4));
+						
+					//2.构建映射表,这里的映射表就是一个结构体JNINativeMethod,并注册给虚拟机
+						env->RegisterNatives(jclass clazz, const JNINativeMethod * methods, jint nMethods);
+						/*
+							参数一:java方法所在的包路径下的类,因为不同的包中Java方法可以同名,所以要指定好是哪个
+								可以:	clz = env->FindClass("com/example/lowlevel/LedNative");
+							参数二:映射表:
+								const JNINativeMethod led_jni_methods[] = {
+										{"openDev", "()I", (void *)open_led},
+										{"devOn", "()I", (void *)led_on},
+										{"devOff", "()I", (void *)led_off},
+										{"closeDev", "()I", (void *)close_led},
+									}
+							参数三:映射表中的项目个数
+						*/
+				}
+			-------->映射表:
+				typedef struct {
+						const char* name;			//JAVA方法名
+						const char* signature;		//参数和返回值类型
+						void*       fnPtr;			//对应的c/c++函数名
+					} JNINativeMethod;
+		(2)实现映射表上的c/c++函数
+			这里编写的代码就是之前的应用层的代码(open , read , write ....)
+		(3)编写Android.mk:
+			LOCAL_PATH:= $(call my-dir)
+			include $(CLEAR_VARS)
+
+			LOCAL_MODULE_TAGS := optional
+
+			LOCAL_MODULE:= libled_jni
+
+			LOCAL_SRC_FILES:= \
+					 jni.cpp
+			#编译后的动态库的名字(这里一定要跟你的app中调用动态库的名字一致)
+			LOCAL_SHARED_LIBRARIES := \
+					libutils
+			#用到了jni.h,所以要指定一下jni.h的路径
+			LOCAL_C_INCLUDES += \
+					$(JNI_H_INCLUDE)
+			#编译成动态库.so
+			include $(BUILD_SHARED_LIBRARY)
+		
+=================================================================================
+Java和JNI之间的数据传递的实现(java传给jni-->通过参数,jni传给Java-->通过返回值)
+	
+			--	基本数据类型: int double float byte boolean	(无需处理)
+	数据 -----	字符串类型:	 (java:String 2个字节)(c/c++:char * 1个字节)	(有差异)
+			--	类对象:		  jni里把所有的类都看成是jobject
+								-->对象(有属性/方法)
+								   获取属性:域ID/获取方法:方法ID
+	字符串:
+		从jni传到java(从char* ---> String)
+			env->NewStringUTF("@_@ from jni...");
+		从java传到jni(也就是从String ---> char *)
+			char * tmp = env->GetStringUTFChars(str, NULL);
+			用完还要记得释放:env->ReleaseStringChars(str,tmp);
+	类对象:
+		对对象操作之前,一定要得到id-->feildID/methodID
+			属性ID：
+				jfieldID nameID = env->GetFieldID(girlCls, "name", "Ljava/lang/String;");
+				GetFieldID(对象的类信息, 属性/方法在JAVA的名字, 属性/方法的描述);
+			方法ID：(方法只能调void型的)
+				jmethodID constructID = env->GetMethodID(girlCls,"<init>", "()V");
+				[注意:这里是构造方法,构造方法的方法名都是<init>]
+		从java传一个对象到jni,得到这个对象的属性:
+			jint age = env->GetIntField(j, ageID);
+			jdouble height = env->GetDoubleField(j, heightID);
+			这里的j是从参数传进来的jobject类型.
+			如果要获得字符串类型,那么要经历2个步骤:
+				先得到jstring(string看成一个类,用GetObjField) ,
+					jstring nameStr = (jstring)env->GetObjectField(j,nameID);
+				再env->GetStringUTFChars(nameStr, NULL);转成char *
+				用这个的时候不要忘了Release.
+
+	几个常用的env方法:
+		(1)获取类的信息
+			env->FindClass("com/example/bean/Girl");
+			如果参数中有从java传过来的类,那么也可以
+			jclass girlCls = env->GetObjectClass(j);
+		(2)回调java中的方法
+			env->CallVoidMethod(girlObj, setInfoID, env->NewStringUTF("Ni"), 20);
+	
+怎么获取在jni中的缩写:
+	在eclipse工程目录下的:\bin\classes>
+		执行：javap -s 声明本地方法的包名.类名
+	Compiled from "LedNative.java"
+		public class com.example.lowlevel.LedNative {
+
+
+			  public native int addNum(int, int);
+				descriptor: (II)I
+
+			  public native java.lang.String getJniString();
+				descriptor: ()Ljava/lang/String;
+
+			  public native void setJniString(java.lang.String);
+				descriptor: (Ljava/lang/String;)V
+
+			  public native com.example.bean.Girl getJniGirl();
+				descriptor: ()Lcom/example/bean/Girl;
+
+			  public native void setJniGirl(com.example.bean.Girl);
+				descriptor: (Lcom/example/bean/Girl;)V
+		}
+	----------------------
+	类的缩写是: L包名/类名;	
+	void --> V	
+		
+========================================================
+					关于运行
+========================================================
+apk --> 安装到开发板上
+	 1,自动安装--- /system/app 
+	 2, 手动安装 --- SD卡(/mnt/sdcard)
+		修改init.fs210.rc 
+			    mkdir /mnt/sdcard 0777 system system
+				mkdir /mnt/ext_sd 0777 system system
+				mkdir /mnt/usb 0777 system system
+
+	 
+jni.so -->  /system/lib/ 
+	cp -raf out/target/product/fs210/system/lib/libled_jni.so    /opt/rootfs_dir/system/lib/
+
+drv.ko -->  /system/lib/modules
+	cp -raf led_drv.ko  /opt/rootfs_dir/system/lib/modules/
+
+修改init.rc自动加载ko和修改权限
+
+283         insmod /system/lib/modules/led_drv.ko
+284          chmod 777 /dev/led_0
+285
+287 on boot
+========================================================	
+		
+总结:
+android端只要关心：
+	1.native声明的方法
+	2.system.loadlibrary()动态库的名字.
+	这些东西在jni编写时要用到.
+	
+jni编写就是从OnLoad()函数一步一步实现.
+	OnLoad函数
+		1.先要获取env(vm->GetEnv得到)
+		2.注册映射表,
+			这里注册是向DVM注册,
+				有个参数class(意思是这个映射表的方法时属于哪个类的,给出包路径+类名)
+			映射表定义,这里就用到android端的native方法.
+		3.实现映射表中对应的c函数,
+			这里的函数实现无非就是open,read,write,close
+			(这里还考虑没有hal层)
+
+驱动的编写
+	驱动:实现module_init()和module_exit()
+		...
+		...
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
